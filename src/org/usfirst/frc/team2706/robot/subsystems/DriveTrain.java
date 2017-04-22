@@ -1,9 +1,11 @@
 package org.usfirst.frc.team2706.robot.subsystems;
 
+import org.usfirst.frc.team2706.robot.Log;
 import org.usfirst.frc.team2706.robot.Robot;
 import org.usfirst.frc.team2706.robot.RobotMap;
 import org.usfirst.frc.team2706.robot.commands.teleop.ArcadeDriveWithJoystick;
 
+import com.ctre.CANTalon;
 import com.kauailabs.navx.frc.AHRS;
 
 import edu.wpi.first.wpilibj.Encoder;
@@ -14,7 +16,6 @@ import edu.wpi.first.wpilibj.PIDSourceType;
 import edu.wpi.first.wpilibj.RobotDrive;
 import edu.wpi.first.wpilibj.SPI;
 import edu.wpi.first.wpilibj.Ultrasonic;
-import edu.wpi.first.wpilibj.Victor;
 import edu.wpi.first.wpilibj.command.Command;
 import edu.wpi.first.wpilibj.command.Subsystem;
 import edu.wpi.first.wpilibj.livewindow.LiveWindow;
@@ -25,7 +26,7 @@ import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
  * These include four drive motors, a left and right encoder and a gyro.
  */
 public class DriveTrain extends Subsystem {
-    private Victor front_left_motor, back_left_motor, front_right_motor, back_right_motor;
+    private CANTalon front_left_motor, back_left_motor, front_right_motor, back_right_motor;
     private RobotDrive drive;
     private Encoder left_encoder, right_encoder;
     private Ultrasonic leftDistanceSensor, rightDistanceSensor;
@@ -33,7 +34,7 @@ public class DriveTrain extends Subsystem {
 
     // TODO: maybe we don't need this
     private GyroPIDSource gyroPIDSource;
-
+    private AverageEncoderPIDSource encoderPIDSource;
     private UltrasonicPIDSource ultrasonicPIDSource;
 
     public double initGyro;
@@ -42,10 +43,10 @@ public class DriveTrain extends Subsystem {
 
     public DriveTrain() {
         super();
-        front_left_motor = new Victor(RobotMap.MOTOR_FRONT_LEFT);
-        back_left_motor = new Victor(RobotMap.MOTOR_REAR_LEFT);
-        front_right_motor = new Victor(RobotMap.MOTOR_FRONT_RIGHT);
-        back_right_motor = new Victor(RobotMap.MOTOR_REAR_RIGHT);
+        front_left_motor = new CANTalon(RobotMap.MOTOR_FRONT_LEFT);
+        back_left_motor = new CANTalon(RobotMap.MOTOR_REAR_LEFT);
+        front_right_motor = new CANTalon(RobotMap.MOTOR_FRONT_RIGHT);
+        back_right_motor = new CANTalon(RobotMap.MOTOR_REAR_RIGHT);
 
         front_left_motor.setInverted(RobotMap.MOTOR_FRONT_LEFT_INVERTED);
         back_left_motor.setInverted(RobotMap.MOTOR_REAR_LEFT_INVERTED);
@@ -79,6 +80,7 @@ public class DriveTrain extends Subsystem {
 
         leftDistanceSensor.setAutomaticMode(true);
 
+        encoderPIDSource = new AverageEncoderPIDSource(left_encoder, right_encoder);
         ultrasonicPIDSource = new UltrasonicPIDSource(leftDistanceSensor, rightDistanceSensor);
 
         // Set up navX gyro
@@ -123,6 +125,15 @@ public class DriveTrain extends Subsystem {
     }
 
     /**
+     * Get the NavX AHRS
+     * 
+     * @return the NavX AHRS
+     */
+    public AHRS getGyro() {
+        return gyro;
+    }
+
+    /**
      * The log method puts interesting information to the SmartDashboard.
      */
     public void log() {
@@ -156,17 +167,48 @@ public class DriveTrain extends Subsystem {
      * @param joy The Xbox style joystick to use to drive arcade style.
      */
     public void drive(GenericHID joy) {
-        drive.arcadeDrive(RobotMap.INVERT_JOYSTICK_Y ? -joy.getRawAxis(5) : joy.getRawAxis(5),
-                        RobotMap.INVERT_JOYSTICK_X ? -joy.getRawAxis(4) : joy.getRawAxis(4), true);
+        double YAxis = RobotMap.INVERT_JOYSTICK_Y ? -joy.getRawAxis(5) : joy.getRawAxis(5);
+        double XAxis = RobotMap.INVERT_JOYSTICK_X ? -joy.getRawAxis(4) : joy.getRawAxis(4);
+        if (joy.getRawButton(9) || joy.getRawButton(10)) {
+            XAxis *= 0.7;
+            YAxis *= 0.7;
+        }
+        drive.arcadeDrive(YAxis, XAxis, true);
+        
+    }
+
+    /**
+     * Untested code that should allow you to drive relative to the field instead of the robot TODO
+     * add a rotation joystick function for robot relative control when needed to align
+     * 
+     * @param joy The main drive joystick
+     * @param rotate Joystick to rotate the robot with
+     */
+    public void headlessDrive(GenericHID joy) {
+        Log.d("HeadlessDrive", joy.getRawAxis(5) + "," + joy.getRawAxis(4));
+        double raw5 = joy.getRawAxis(5);
+       double raw4 = joy.getRawAxis(4);
+        double angle = normalize(Math.toDegrees(Math.atan(raw5 / raw4)));
+        
+        double speed = (raw5 + raw4) / 2; // hyp
+        if(Math.abs(speed) < 0.1) {
+            speed = 0;
+            angle = Robot.driveTrain.getHeading();
+        }
+        Log.d("HeadlessDrive", "Angle: " + angle + ", Speed: " + speed);
+        double gyroAngle;
+            gyroAngle = normalize(Robot.driveTrain.getHeading());
+        Log.d("HeadlessDrive", (angle - gyroAngle * 0.1) * speed);
+        drive.arcadeDrive(-speed,- (angle - gyroAngle * 0.1) * speed,true);
     }
 
     /**
      * Reset the robots sensors to the zero states.
      */
     public void reset() {
-        left_encoder.reset();
-        right_encoder.reset();
+        resetEncoders();
         resetGyro();
+        resetDisplacement();
     }
 
     /**
@@ -177,6 +219,14 @@ public class DriveTrain extends Subsystem {
     }
 
     /**
+     * Reset the robot encoders to zero states
+     */
+    public void resetEncoders() {
+        left_encoder.reset();
+        right_encoder.reset();
+    }
+
+    /**
      * @return The robots heading in degrees.
      */
     public double getHeading() {
@@ -184,12 +234,54 @@ public class DriveTrain extends Subsystem {
     }
 
     /**
+     * Resets the displacement of the robot
+     */
+    public void resetDisplacement() {
+        gyro.resetDisplacement();
+    }
+
+    /**
+     * Gets the x distance of the robot with a direction
+     */
+    public double getDisplacementX() {
+        return gyro.getDisplacementX();
+    }
+
+    /**
+     * Gets the y distance of the robot with a direction
+     */
+
+    public double getDisplacementY() {
+        return gyro.getDisplacementY();
+    }
+
+    /**
+     * Gets the z distance of the robot with a direction
+     */
+    public double getDisplacementZ() {
+        return gyro.getDisplacementZ();
+    }
+
+    /**
+     * Sets the CANTalon motors to go into brake mode or coast mode
+     * 
+     * @param on Set to brake when true and coast when false
+     */
+    public void brakeMode(boolean on) {
+        front_left_motor.enableBrakeMode(on);
+        back_left_motor.enableBrakeMode(on);
+        front_right_motor.enableBrakeMode(on);
+        back_right_motor.enableBrakeMode(on);
+    }
+
+    /**
      * @param useGyroStraightening True to invert second motor direction for rotating
      * 
      * @return The robot's drive PIDOutput
      */
-    public PIDOutput getDrivePIDOutput(boolean useGyroStraightening, boolean invert) {
-        return new DrivePIDOutput(drive, useGyroStraightening, invert);
+    public PIDOutput getDrivePIDOutput(boolean useGyroStraightening, boolean useCamera,
+                    boolean invert) {
+        return new DrivePIDOutput(drive, useGyroStraightening, useCamera, invert);
     }
 
     /**
@@ -202,6 +294,22 @@ public class DriveTrain extends Subsystem {
 
     public void invertGyroPIDSource(boolean invert) {
         gyroPIDSource.invert(invert);
+    }
+
+    /**
+     * Takes values of the two distance sensors and finds the angle the robot is on with the wall
+     * 
+     * @return -90 to 90 degrees
+     */
+    public double GetAngleWithDistanceSensors() {
+        double opposite = getRightDistanceToObstacle() - getLeftDistanceToObstacle();
+        // Converts centimeters to inches so the two measurements match up
+        double adjacent = RobotMap.DISTANCE_SENSOR_SEPARATION_CM / 2.54;
+        // Inverse tangent to take two sides of the triangle and get the angle
+        double theta = Math.toDegrees(Math.atan2(opposite, adjacent));
+        Log.d("Degree Sensor Angle", theta);
+        
+        return theta;
     }
 
     /**
@@ -228,8 +336,13 @@ public class DriveTrain extends Subsystem {
         } else {
             return right_encoder;
         }
+       
     }
 
+    public PIDSource getAverageEncoderPIDSource() {
+        return encoderPIDSource;
+    }
+    
     /**
      * @return The distance to the obstacle detected by the distance sensor.
      */
@@ -268,6 +381,34 @@ public class DriveTrain extends Subsystem {
 
     }
 
+    class AverageEncoderPIDSource implements PIDSource {
+
+        private final Encoder left, right;
+
+        public AverageEncoderPIDSource(Encoder left, Encoder right) {
+            this.left = left;
+            this.right = right;
+        }
+
+        @Override
+        public void setPIDSourceType(PIDSourceType pidSource) {
+            left.setPIDSourceType(pidSource);
+            right.setPIDSourceType(pidSource);
+        }
+
+        @Override
+        public PIDSourceType getPIDSourceType() {
+            return left.getPIDSourceType();
+        }
+
+        @Override
+        public double pidGet() {
+            return (left.getDistance() + right.getDistance()) / 2;
+        }
+
+    }
+
+    
     class GyroPIDSource implements PIDSource {
 
         private final DriveTrain driveTrain;
@@ -303,24 +444,51 @@ public class DriveTrain extends Subsystem {
     }
 
     public class DrivePIDOutput implements PIDOutput {
-        
+
         private final RobotDrive drive;
 
         private boolean invert;
 
         private final boolean useGyroStraightening;
 
-        public DrivePIDOutput(RobotDrive drive, boolean useGyroStraightening, boolean invert) {
+        private final boolean useCamera;
+
+        public DrivePIDOutput(RobotDrive drive, boolean useGyroStraightening, boolean useCamera,
+                        boolean invert) {
             this.drive = drive;
             this.useGyroStraightening = useGyroStraightening;
+            this.useCamera = useCamera;
             this.invert = invert;
         }
 
         @Override
         public void pidWrite(double output) {
-            double rotateVal = (normalize(getHeading() - initGyro) * 0.1);
 
-            // System.out.println("Rotate:\t"+rotateVal);
+            double rotateVal;
+            if (useCamera) {
+                // Checks if target is found, cuts off the edges, and then creates a rotation value
+                if (Robot.camera.getTarget() != null) {
+                    if (Robot.camera.getTarget().ctrX > -0.8 && Robot.camera.getTarget().ctrX < 0.8
+                                    && Robot.camera.getTarget().ctrY > -0.8
+                                    && Robot.camera.getTarget().ctrY < 0.8) {
+                        rotateVal = Robot.camera.getTarget() != null
+                                        ? (Robot.camera.getTarget().ctrY + 0.05) * 1.7 : 0;
+                        if (rotateVal > 0.6) {
+                            rotateVal = 0.6;
+                        }
+                        if (rotateVal < -0.6) {
+                            rotateVal = -0.6;
+                        }
+                    } else {
+                        rotateVal = 0;
+                    }
+                } else {
+                    rotateVal = 0;
+                }
+            } else {
+                rotateVal = normalize(getHeading() - initGyro) * 0.15;
+            }
+
 
             if (useGyroStraightening)
                 if (invert) {
@@ -328,12 +496,11 @@ public class DriveTrain extends Subsystem {
                 } else {
                     drive.arcadeDrive(-output, -rotateVal);
                 }
-            else 
-                if (invert) {
-                    drive.setLeftRightMotorOutputs(-output, output);
-                } else {
-                    drive.setLeftRightMotorOutputs(output, output);
-                }
+            else if (invert) {
+                drive.setLeftRightMotorOutputs(-output, output);
+            } else {
+                drive.setLeftRightMotorOutputs(output, output);
+            }
         }
 
         public void setInvert(boolean invert) {
